@@ -2,6 +2,7 @@ import os
 import socket
 import threading
 from cryptography.fernet import Fernet
+import mimetypes
 
 # Директория, где находятся сайты
 SITES_DIR = 'sites'
@@ -27,6 +28,10 @@ def encrypt(data):
 def decrypt(data):
     return cipher.decrypt(data)
 
+def get_mime_type(file_path):
+    mime_type, _ = mimetypes.guess_type(file_path)
+    return mime_type or 'application/octet-stream'
+
 def handle_client(client_socket):
     try:
         # Отправка клиенту ключа шифрования
@@ -51,26 +56,41 @@ def handle_client(client_socket):
                     url = parts[1]
                     if url.startswith('lll://'):
                         domain = url[6:]
-                        file_path = os.path.join(SITES_DIR, domain)
+                        file_path = os.path.join(SITES_DIR, domain, "index.html")
 
                         if os.path.isfile(file_path):
-                            with open(file_path, 'r', encoding='utf-8') as file:
+                            mime_type = get_mime_type(file_path)
+                            with open(file_path, 'rb') as file:
                                 response_content = file.read()
-                            response = f"LLL/1.0 200 OK\n\n{response_content}"
+                            response = f"LLL/1.0 200 OK\nContent-Type: {mime_type}\n\n".encode() + response_content
                         else:
-                            response = "LLL/1.0 404 Not Found\n\n404 File Not Found"
+                            response_content = "404 File Not Found".encode()
+                            response = f"LLL/1.0 404 Not Found\nContent-Type: text/plain\n\n".encode() + response_content
                     else:
-                        response = "LLL/1.0 400 Bad Request\n\n400 Bad Request"
+                        response_content = "400 Bad Request".encode()
+                        response = f"LLL/1.0 400 Bad Request\nContent-Type: text/plain\n\n".encode() + response_content
                 else:
-                    response = "LLL/1.0 400 Bad Request\n\n400 Bad Request"
+                    response_content = "400 Bad Request".encode()
+                    response = f"LLL/1.0 400 Bad Request\nContent-Type: text/plain\n\n".encode() + response_content
 
-            encrypted_response = encrypt(response.encode('utf-8'))
+            encrypted_response = encrypt(response)
             client_socket.sendall(encrypted_response)
             print("Ответ отправлен клиенту")
     
     finally:
         print("Соединение закрыто")
         client_socket.close()
+
+def ensure_site_directories():
+    # Получаем список всех подкаталогов в SITES_DIR
+    for domain in os.listdir(SITES_DIR):
+        domain_dir = os.path.join(SITES_DIR, domain)
+        if os.path.isdir(domain_dir):  # Проверяем, что это действительно каталог
+            index_file = os.path.join(domain_dir, "index.html")
+            if not os.path.isfile(index_file):
+                with open(index_file, 'w') as f:
+                    f.write(f"<html><body><h1>Welcome to {domain}</h1></body></html>")
+                print(f"Создан {index_file} для домена {domain}")
 
 def lll_server(host, port):
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -87,4 +107,5 @@ def lll_server(host, port):
 
 if __name__ == "__main__":
     os.makedirs(SITES_DIR, exist_ok=True)
+    ensure_site_directories()
     lll_server('localhost', 8080)
