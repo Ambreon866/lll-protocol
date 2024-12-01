@@ -1,125 +1,129 @@
-import tkinter as tk
-from tkinter import simpledialog
-from tkhtmlview import HTMLLabel
+import sys
 import socket
-import threading
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QLineEdit, QPushButton, 
+                             QVBoxLayout, QWidget, QMenuBar, QAction, QInputDialog)
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtCore import QThread, pyqtSignal
 from cryptography.fernet import Fernet
-import os
 
-client_key_path = "client_encryption_key.key"
+class NetworkThread(QThread):
+    response_received = pyqtSignal(str)
 
-def load_client_key():
-    if os.path.exists(client_key_path):
-        with open(client_key_path, "rb") as key_file:
-            return key_file.read()
-    return None
+    def __init__(self, server_ip, server_port, url):
+        super().__init__()
+        self.server_ip = server_ip
+        self.server_port = server_port
+        self.url = url
 
-def save_client_key(key):
-    with open(client_key_path, "wb") as key_file:
-        key_file.write(key)
+    def run(self):
+        try:
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client_socket.connect((self.server_ip, self.server_port))
+            
+            # Получаем ключ шифрования от сервера
+            encryption_key = client_socket.recv(4096)
+            cipher = Fernet(encryption_key)
+            
+            # Шифрование и отправка запроса
+            encrypted_request = cipher.encrypt(f"GET {self.url}".encode('utf-8'))
+            client_socket.sendall(encrypted_request)
+            
+            # Получение и дешифровка ответа
+            encrypted_response = client_socket.recv(4096)
+            decrypted_response = cipher.decrypt(encrypted_response).decode('utf-8')
 
-def delete_client_key():
-    if os.path.exists(client_key_path):
-        os.remove(client_key_path)
-        print("Клиентский ключ удален.")
+            # Отделяем заголовки от содержимого
+            headers, _, content = decrypted_response.partition('\n\n')
+            
+            self.response_received.emit(content)
+        
+        except Exception as e:
+            error_message = f"<html><body><h1>Ошибка подключения</h1><p>{str(e)}</p></body></html>"
+            self.response_received.emit(error_message)
+        
+        finally:
+            client_socket.close()
 
-def fetch_key_from_server(client_socket):
-    encryption_key = client_socket.recv(1024)
-    save_client_key(encryption_key)
-    return encryption_key
+class BrowserWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
 
-def encrypt(data, cipher):
-    return cipher.encrypt(data)
+        self.setWindowTitle("Goat Browser")
+        self.setMinimumSize(800, 600)
+        
+        # Используем базовый IP и порт
+        self.server_ip = "localhost"
+        self.server_port = 8080
 
-def decrypt(data, cipher):
-    return cipher.decrypt(data)
+        self.browser = QWebEngineView()
+        
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("Введите lll:// URL")
 
-server_ip = ''
+        self.go_button = QPushButton("Перейти")
+        self.go_button.clicked.connect(self.load_url)
 
-def set_server_ip():
-    global server_ip
-    server_ip = simpledialog.askstring("Server IP", "Введите IP-адрес сервера:")
+        layout = QVBoxLayout()
+        layout.addWidget(self.url_input)
+        layout.addWidget(self.go_button)
+        layout.addWidget(self.browser)
 
-def fetch_page(url):
-    try:
-        port = 8080
+        container = QWidget()
+        container.setLayout(layout)
+        self.setCentralWidget(container)
 
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client_socket.connect((server_ip, port))
+        self.create_menu()
 
-        # Получаем ключ каждый раз при подключении
-        print("Получение ключа от сервера...")
-        key = fetch_key_from_server(client_socket)
-        print(f"Ключ получен: {key.decode()}")
+    def create_menu(self):
+        menubar = self.menuBar()
 
-        cipher = Fernet(key)
+        server_menu = menubar.addMenu("Меню")
+        
+        set_server_action = QAction("Сервер", self)
+        set_server_action.triggered.connect(self.set_server)
+        
+        set_port_action = QAction("Порт", self)
+        set_port_action.triggered.connect(self.set_port)
 
-        # Формирование и шифрование запроса
-        request = f"GET lll://{url} LLL/1.0"
-        print(f"Запрос: {request}")
-        encrypted_request = encrypt(request.encode('utf-8'), cipher)
+        server_menu.addAction(set_server_action)
+        server_menu.addAction(set_port_action)
 
-        client_socket.sendall(encrypted_request)
-        print("Зашифрованный запрос отправлен.")
+    def set_server(self):
+        server_ip, ok = QInputDialog.getText(self, "Сервер", "Введите адрес сервера:")
+        if ok and server_ip:
+            self.server_ip = server_ip
 
-        # Получение и расшифровка ответа
-        encrypted_response = client_socket.recv(4096)
-        response = decrypt(encrypted_response, cipher).decode('utf-8')
+    def set_port(self):
+        port, ok = QInputDialog.getInt(
+            self, "Порт", "Введите порт сервера:", value=self.server_port, min=1, max=65535)
+        if ok:
+            self.server_port = port
 
-        client_socket.close()
+    def load_url(self):
+        url = self.url_input.text()
+        
+        self.network_thread = NetworkThread(self.server_ip, self.server_port, url)
+        self.network_thread.response_received.connect(self.display_response)
+        self.network_thread.start()
 
-        headers, html_content = response.split('\n\n', 1)
-        print(f"Получен ответ: {headers}")
-        return html_content
-    except Exception as e:
-        error_message = f"Ошибка при получении страницы: {str(e)}"
-        print(error_message)
-        return f"<html><body><h1>{error_message}</h1></body></html>"
+    def display_response(self, content):
+        self.browser.setHtml(content)
+        self.adjust_window_size()
 
-def fetch_and_show_page(url):
-    if not server_ip:
-        update_html_content("<html><body><h1>IP-адрес сервера не установлен!</h1></body></html>")
-    else:
-        html_content = fetch_page(url)
-        root.after(0, update_html_content, html_content)
+    def adjust_window_size(self):
+        # Используйте JavaScript для получения высоты содержимого и адаптации окна
+        self.browser.page().runJavaScript(
+            "document.documentElement.scrollHeight", self.on_window_size_calculated)
 
-def update_html_content(html_content):
-    html_label.set_html(html_content)
-    root.update_idletasks()
-    width = html_label.winfo_reqwidth()
-    height = html_label.winfo_reqheight()
-    root.geometry(f"{width}x{height}")
+    def on_window_size_calculated(self, height):
+        # Если высота страницы больше текущей высоты окна, измените размер окна
+        if height > self.height():
+            new_size = self.size()
+            new_size.setHeight(height + 50)  # немного добавим для отступа
+            self.resize(new_size)
 
-def load_page():
-    url = url_entry.get()
-    threading.Thread(target=fetch_and_show_page, args=(url,)).start()
-
-def on_closing():
-    delete_client_key()
-    root.destroy()
-
-root = tk.Tk()
-root.title("Goat Browser")
-
-menu = tk.Menu(root)
-root.config(menu=menu)
-
-file_menu = tk.Menu(menu, tearoff=0)
-menu.add_cascade(label="File", menu=file_menu)
-file_menu.add_command(label="Установить IP сервера", command=set_server_ip)
-
-url_label = tk.Label(root, text="Введите URL:")
-url_label.pack()
-
-url_entry = tk.Entry(root, width=50)
-url_entry.pack()
-
-load_button = tk.Button(root, text="Загрузить страницу", command=load_page)
-load_button.pack()
-
-html_label = HTMLLabel(root, width=80, height=20)
-html_label.pack(fill="both", expand=True)
-
-root.protocol("WM_DELETE_WINDOW", on_closing)
-
-root.mainloop()
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = BrowserWindow()
+    window.show()
+    sys.exit(app.exec_())
